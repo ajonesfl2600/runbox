@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Runbox
+Comment=Run one shell command in a small popup terminal
+Exec=runbox
+Icon=io.github.ajonesfl2600.runbox
+Categories=Utility;
+Terminal=false
+StartupWMClass=runbox

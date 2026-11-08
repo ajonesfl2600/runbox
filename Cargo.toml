@@ -1,0 +1,17 @@
+[package]
+name = "runbox"
+version = "0.1.0"
+edition = "2024"
+description = "A hotkey popup that runs one shell command in a real terminal, and lets a script hand you a command to approve before it runs"
+authors = ["Adam Jones"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ajonesfl2600/runbox"
+readme = "README.md"
+keywords = ["terminal", "popup", "gtk4", "vte", "approval"]
+categories = ["command-line-utilities", "gui"]
+
+[dependencies]
+gio = { version = "0.22", features = ["v2_80"] }
+gtk4 = { version = "0.11", features = ["v4_18"] }
+nix = { version = "0.31", features = ["signal", "process"] }
+vte4 = { version = "0.10", features = ["v0_80"] }

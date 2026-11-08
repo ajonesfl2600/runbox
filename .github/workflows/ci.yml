@@ -1,0 +1,87 @@
+name: ci
+# Format, lint, unit tests, release build and the real X11 GUI test.
+#
+# One unprivileged job: no secrets, no pull_request_target. PR code runs here,
+# which is safe only because the job has nothing to leak. Keep it that way.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    # Ubuntu 24.04 has GTK 4.14 and VTE 0.76. runbox needs GTK 4.18 and
+    # VTE 0.80, which Debian 13 has. The tag pins the toolchain's Rust too.
+    container: rust:1.99.1-trixie
+    # Disk: a debuginfo=2 gtk4 build for clippy, check and test is large enough to
+    # fill a small runner. Nothing here needs debug symbols or incremental state,
+    # so drop both.
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Confirm the job runs in Debian 13
+        run: |
+          grep PRETTY_NAME /etc/os-release
+          grep -q '^VERSION_CODENAME=trixie$' /etc/os-release
+
+      # actions/checkout is a node action, and the rust image has no node.
+      # With git installed it does a real clone instead of downloading a tarball.
+      - name: Install build and GUI-test packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git nodejs libgtk-4-dev libvte-2.91-gtk4-dev librsvg2-common pkg-config \
+            xvfb xdotool x11-utils x11-apps wmctrl muffin cinnamon-settings-daemon dbus \
+            desktop-file-utils libglib2.0-bin
+          pkg-config --modversion gtk4 vte-2.91-gtk4
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Icon is the handed-over file
+        run: echo "c3c4d6433ad384e530caeabe6b144d3f48f2ca773e28f68a0cfd70983fdaf074  data/icons/hicolor/scalable/apps/io.github.ajonesfl2600.runbox.svg" | sha256sum -c
+
+      - name: Demo gif is the handed-over file
+        run: echo "e63cffaff6befde97ef94d6f13168b874dcd178a45922569834fe733705f1030  docs/demo.gif" | sha256sum -c
+
+      - name: Desktop file
+        run: desktop-file-validate data/io.github.ajonesfl2600.runbox.desktop
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      # Exit 77 (a tool is missing, so SKIPPED) is non-zero and fails this step.
+      # Never add `|| true` or an exit-77 escape here.
+      - name: GUI test (Xvfb + muffin + xdotool)
+        env:
+          # A CI runner can be a slow, shared 1-CPU box. 400 ms (the default) is a
+          # desktop budget.
+          RUNBOX_STARTUP_BUDGET_MS: "1500"
+        run: tests/gui_xvfb.sh target/release/runbox
+
+      # Runs on failure and cancel too, so a dead job doesn't leave target/ behind.
+      - name: Free build output
+        if: always()
+        run: |
+          du -sh target || true
+          cargo clean

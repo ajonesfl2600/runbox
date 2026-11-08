@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- runbox concept B: "Prompt Play" - a popup terminal whose prompt is a play triangle, with a block cursor -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#55617f"/>
+      <stop offset="1" stop-color="#363e57"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="12" y="12" width="232" height="232" rx="52"/>
+    </clipPath>
+  </defs>
+
+  <!-- tile -->
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)"/>
+
+  <!-- popup title strip -->
+  <rect x="12" y="12" width="232" height="36" fill="#75829f" clip-path="url(#tile)"/>
+
+  <!-- play prompt -->
+  <path d="M66 88 L150 142 L66 196 Z" fill="#ff8c42" stroke="#ff8c42" stroke-width="18" stroke-linejoin="round"/>
+
+  <!-- block cursor -->
+  <rect x="164" y="156" width="40" height="40" rx="9" fill="#ffffff"/>
+</svg>
