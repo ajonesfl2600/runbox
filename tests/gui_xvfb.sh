@@ -177,7 +177,50 @@ is_colour() {
     (( hi - lo > 60 ))
 }
 
-type_cmd() { rm -f "$DUMP"; xdotool type --delay 8 -- "$1"; }
+type_cmd() { rm -f "$DUMP" "$DUMP.input"; xdotool type --delay 8 -- "$1"; }
+
+# Run and Exit are both 72 px wide, at the right end of the bar (1px border + 6px
+# padding + 6px between them). These are their centres, from the window's top left.
+run_xy()  { echo $((WIDTH - 7 - 72 - 6 - 36)) 20; }
+exit_xy() { echo $((WIDTH - 7 - 36)) 20; }
+
+# Click at a point given relative to the window's top left.
+click_at() {
+    eval "$(xdotool getwindowgeometry --shell "$WID")"
+    xdotool mousemove $((X + $1)) $((Y + $2)) sleep 0.2 click 1
+}
+click_run()  { eval "$(xdotool getwindowgeometry --shell "$WID")"; click_at $(run_xy); }
+click_exit() { eval "$(xdotool getwindowgeometry --shell "$WID")"; click_at $(exit_xy); }
+
+# The window's top left on the screen, as "X Y".
+win_xy() { eval "$(xdotool getwindowgeometry --shell "$WID")"; echo "$X $Y"; }
+
+# A real mouse drag from (x1, y1) to (x2, y2), relative to the window's top left
+# when the drag starts. It moves in steps, like a hand, so GTK sees a drag.
+drag() {
+    eval "$(xdotool getwindowgeometry --shell "$WID")"
+    local x1=$((X + $1)) y1=$((Y + $2)) x2=$((X + $3)) y2=$((Y + $4)) i
+    xdotool mousemove "$x1" "$y1" sleep 0.2 mousedown 1
+    for i in $(seq 1 12); do
+        xdotool mousemove $((x1 + (x2 - x1) * i / 12)) $((y1 + (y2 - y1) * i / 12))
+        sleep 0.03
+    done
+    sleep 0.2
+    xdotool mouseup 1
+    sleep 0.5
+}
+
+# Did the window move at least 50 px both ways between two win_xy readings?
+moved_50() {
+    local x0 y0 x1 y1
+    read -r x0 y0 <<<"$1"; read -r x1 y1 <<<"$2"
+    local dx=$(( x1 > x0 ? x1 - x0 : x0 - x1 )) dy=$(( y1 > y0 ? y1 - y0 : y0 - y1 ))
+    (( dx >= 50 && dy >= 50 ))
+}
+
+# One value from the command-box report runbox writes (RUNBOX_DUMP set) just
+# before it runs a command: lines, overflow, vscroll, box_height, window_width.
+input_val() { sed -n "s/^$1=//p" "$DUMP.input" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
 # Arguments that must answer and exit without ever starting a window.
@@ -270,8 +313,7 @@ type_cmd "echo via-ctrl-enter"; xdotool key ctrl+Return
 check "Ctrl+Enter runs" 'wait_for "via-ctrl-enter"'
 
 type_cmd "echo via-click"
-eval "$(xdotool getwindowgeometry --shell "$WID")"
-xdotool mousemove $((X + WIDTH - 32)) $((Y + 22)) sleep 0.2 click 1
+click_run
 check "clicking the Run button runs" 'wait_for "via-click"'
 
 # Super+R again: the running instance comes back, no second window
@@ -311,6 +353,127 @@ launch
 xdotool key ctrl+q
 sleep 0.8
 check "Ctrl+Q when idle closes" '! app_alive'
+
+# ---------------------------------------------------------------------------
+# The Exit button. It takes the same path as Ctrl+Q.
+launch
+click_exit
+sleep 0.8
+check "Exit button when idle closes" '! app_alive'
+
+# While a command runs, Exit needs a second press. The first click must not take
+# keyboard focus off the terminal, so the program still gets what you type.
+launch
+type_cmd "read x; touch $WORK/exit-got-\$x; sleep 31.9"; xdotool key Return
+sleep 0.8
+click_exit
+sleep 0.3
+check "first Exit click while running keeps the window" 'app_alive && [[ "$(window_count)" == 1 ]]'
+xdotool type --delay 8 "z"; xdotool key Return
+sleep 0.5
+check "after one Exit click the running command still gets keys" '[[ -e "$WORK/exit-got-z" ]]'
+check "first Exit click does not kill the command" 'pgrep -f "sleep 31.9" >/dev/null'
+click_exit
+sleep 1
+check "second Exit click within 3 s closes the window" '! app_alive'
+check "second Exit click kills the running command" '! pgrep -f "sleep 31.9" >/dev/null'
+
+# ---------------------------------------------------------------------------
+# The command box wraps. What runs is what was typed, byte for byte.
+launch
+WIDTH0=$WIDTH
+type_cmd "echo short-one"; xdotool key Return
+wait_for "short-one" || true
+SHORT_H=$(input_val box_height)
+check "a one-line command takes one line" '[[ "$(input_val lines)" == 1 ]]'
+
+WRAP_PRE="printf '%s' '"
+WRAP_POST="' > $WORK/wrap.out"
+WRAP_NEED=$(( 300 - ${#WRAP_PRE} - ${#WRAP_POST} ))
+WRAP_PAYLOAD=""
+for i in $(seq 1 100); do WRAP_PAYLOAD+="wrap$(printf %03d "$i") "; done
+WRAP_PAYLOAD=${WRAP_PAYLOAD:0:WRAP_NEED}
+WRAP_CMD="$WRAP_PRE$WRAP_PAYLOAD$WRAP_POST"
+type_cmd "$WRAP_CMD"
+click_run
+wait_for "[exit 0]" || true
+echo "      300-char command: lines=$(input_val lines) overflow=$(input_val overflow) box_height=$(input_val box_height) (one line: $SHORT_H)"
+check "the 300-character command is 300 characters" '[[ "${#WRAP_CMD}" == 300 ]]'
+check "a 300-character command wraps onto several lines" '(( $(input_val lines) >= 3 ))'
+check "nothing runs off the box sideways (no horizontal overflow)" '[[ "$(input_val overflow)" == 0 ]]'
+check "the box grew taller for it" '(( $(input_val box_height) > SHORT_H ))'
+check "the window keeps its width" '[[ "$(input_val window_width)" == "$WIDTH0" ]] && eval "$(xdotool getwindowgeometry --shell "$WID")" && [[ "$WIDTH" == "$WIDTH0" ]]'
+check "Run runs the wrapped command exactly (no newline added)" 'cmp -s <(printf "%s" "$WRAP_PAYLOAD") "$WORK/wrap.out"'
+check "the \$ echo line is the command, byte for byte" 'grep -qxF -- "\$ $WRAP_CMD" "$DUMP"'
+
+# WordChar: one long word with no spaces still wraps.
+LONG_WORD=$(printf 'q%.0s' $(seq 1 250))
+type_cmd "echo $LONG_WORD"; xdotool key Return
+check "a long word with no spaces runs" 'wait_for "$LONG_WORD"'
+check "a long word with no spaces wraps too (WordChar)" '(( $(input_val lines) >= 2 )) && [[ "$(input_val overflow)" == 0 ]]'
+
+# Shift+Enter puts in a newline. The two-line command runs as typed.
+type_cmd "echo line-one"; xdotool key shift+Return; xdotool type --delay 8 "echo line-two"
+xdotool key Return
+check "Shift+Enter makes a two-line command" 'wait_for "[exit 0]" && [[ "$(input_val lines)" == 2 ]]'
+check "both lines run, in order" 'grep -qx "line-one" "$DUMP" && grep -qx "line-two" "$DUMP" && grep -A1 -xF "\$ echo line-one" "$DUMP" | grep -qx "echo line-two"'
+
+# The box grows to about 6 lines, then scrolls instead of growing.
+type_cmd "echo L1"
+for i in $(seq 2 10); do xdotool key shift+Return; xdotool type --delay 8 "echo L$i"; done
+xdotool key Return
+wait_for "L10" || true
+echo "      10-line command: box_height=$(input_val box_height) vscroll=$(input_val vscroll)"
+check "a 10-line command runs all 10 lines" 'grep -qx "L1" "$DUMP" && grep -qx "L10" "$DUMP"'
+check "the box stops growing and scrolls (10 lines)" '(( $(input_val vscroll) > 0 ))'
+
+# ---------------------------------------------------------------------------
+# Dragging. The bar's empty space and the status line move the window. A drag in
+# the command box selects text, and a drag in the terminal selects output.
+
+# Command box: drag from the start of the text across it, then type over the
+# selection. If the drag selected the text, only the new command is left.
+type_cmd "echo dragsel-abcdef"
+G0=$(win_xy)
+drag 10 22 $((WIDTH / 2)) 22
+G1=$(win_xy)
+check "a drag in the command box does not move the window" '[[ "$G0" == "$G1" ]]'
+xdotool type --delay 8 "echo SELREPLACED"; xdotool key Return
+check "a drag in the command box selects its text" 'wait_for "SELREPLACED" && grep -qx "SELREPLACED" "$DUMP" && ! grep -qF dragsel "$DUMP"'
+
+# Terminal: fill it with one word, drag across the middle, copy, and paste it
+# back into a command that checks what it got.
+type_cmd 'for i in $(seq 60); do echo SELROW; done'; xdotool key Return
+wait_for "[exit 0]" || true
+G0=$(win_xy)
+drag 20 $((HEIGHT / 2)) $((WIDTH - 40)) $((HEIGHT / 2 + 50))
+G1=$(win_xy)
+check "a drag in the terminal does not move the window" '[[ "$G0" == "$G1" ]]'
+xdotool key ctrl+shift+c
+click_at 200 22; xdotool key ctrl+a
+rm -f "$DUMP" "$DUMP.input"
+xdotool type --delay 8 "printf '%s' '"; xdotool key ctrl+v
+xdotool type --delay 8 "' | grep -q SELROW && echo SEL-OK-\$((6*7))"; xdotool key Return
+check "a drag in the terminal selects its output" 'wait_for "[exit" && grep -qx "SEL-OK-42" "$DUMP"'
+
+# The handles: the bar's padding above the command box, and the status line.
+G0=$(win_xy)
+drag $((WIDTH / 2)) 3 $((WIDTH / 2 + 120)) 93
+G1=$(win_xy)
+echo "      bar drag: $G0 -> $G1"
+check "dragging the bar moves the window (50 px or more)" 'moved_50 "$G0" "$G1"'
+eval "$(xdotool getwindowgeometry --shell "$WID")"
+G0=$(win_xy)
+drag $((WIDTH / 2)) $((HEIGHT - 6)) $((WIDTH / 2 - 100)) $((HEIGHT - 76))
+G1=$(win_xy)
+echo "      status-line drag: $G0 -> $G1"
+check "dragging the status line moves the window (50 px or more)" 'moved_50 "$G0" "$G1"'
+check "the moved window keeps its size" 'eval "$(xdotool getwindowgeometry --shell "$WID")" && [[ "$WIDTH" == "$WIDTH0" ]]'
+type_cmd "echo after-move"; xdotool key Return
+check "the moved window still runs commands" 'wait_for "after-move"'
+xdotool key Escape
+sleep 0.8
+check "the moved window closes on Esc" '! app_alive'
 
 # ---------------------------------------------------------------------------
 # runbox --request: a caller puts a command in the box; it runs only on Enter.
@@ -378,6 +541,20 @@ xdotool key Escape; wait_rc
 check "request: Esc declines (125)" '[[ "$RC" == 125 ]] && grep -q declined "$REQ_ERR"'
 check "request: declined command did not run" '[[ ! -e "$WORK/must-not-exist" ]]'
 check "request: Esc closed the window" '[[ "$(window_count)" == 0 ]]'
+
+# The Exit button declines a request the same way Esc does.
+request_bg "touch $WORK/exit-must-not-exist"
+WID=$(xdotool search --onlyvisible --name '^Runbox$' 2>/dev/null | head -1)
+click_exit; wait_rc
+check "request: Exit click declines (125)" '[[ "$RC" == 125 ]] && grep -q declined "$REQ_ERR"'
+check "request: command declined with Exit did not run" '[[ ! -e "$WORK/exit-must-not-exist" ]]'
+check "request: Exit closed the window" '[[ "$(window_count)" == 0 ]]'
+
+# A long prefilled request runs exactly as handed over, wrapping or not.
+REQ_PAYLOAD=$(printf 'r%.0s' $(seq 1 120))" with spaces $(printf 'z%.0s' $(seq 1 120))"
+request_bg "printf '%s' '$REQ_PAYLOAD' > $WORK/req-wrap.out"
+xdotool key Return; wait_rc
+check "request: a long prefilled command runs byte for byte" '[[ "$RC" == 0 ]] && cmp -s <(printf "%s" "$REQ_PAYLOAD") "$WORK/req-wrap.out"'
 
 # Closing mid-run answers the caller instead of leaving it hanging.
 request_bg "sleep 31.3"; xdotool key Return; sleep 0.8

@@ -30,11 +30,16 @@ Then bind it to a key (see [Install](#install)).
 | Key | What it does |
 |---|---|
 | Enter, Ctrl+Enter, Alt+R, or click **Run** | Run the command |
+| Shift+Enter | Start a new line in the command box |
 | (while a command runs) | Type answers to its prompts |
 | Ctrl+C | Stop the running command |
-| Esc or Ctrl+Q | Close when nothing is running (while a command runs, Esc goes to the program) |
-| Ctrl+W | Close. While a command runs, press it twice within 3 seconds to kill the command and close |
+| Esc | Close when nothing is running (while a command runs, Esc goes to the program) |
+| Ctrl+Q, Ctrl+W, Alt+E, or click **Exit** | Close. While a command runs, press it twice within 3 seconds to kill the command and close |
 | Ctrl+Shift+C / Ctrl+Shift+V | Copy output / paste into a running command |
+
+The command box wraps a long command so you can read all of it before you run it. It starts 3 lines tall, grows to 6, then scrolls. Wrapping only changes how it looks. What runs is exactly what you typed.
+
+The window has no title bar. To move it, drag the empty space around the command box and buttons, or the status line at the bottom. Dragging in the command box or the terminal selects text, as usual.
 
 Only one window runs at a time. Pressing Super+R again brings back the open one.
 
@@ -55,7 +60,7 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | the command's own code | It ran. A command killed by a signal gives 128 + the signal, so Ctrl+C gives 130, like bash |
-| `125` | Declined with Esc, or the window closed before the command finished |
+| `125` | Declined with Esc or Exit, or the window closed before the command finished |
 | `75` | Busy: another request is waiting or a command is running. Try again later |
 | `2` | Bad arguments |
 
@@ -130,7 +135,7 @@ runbox is an approval step. It is not a sandbox.
 ## How it's tested
 
 - `cargo test` runs the unit tests.
-- `tests/gui_xvfb.sh` is an end-to-end test on a real X11 display. It starts a private Xvfb server, runs muffin (Cinnamon's window manager) and drives runbox with xdotool: real key presses and real clicks. It answers a `[Y/n]` prompt, types a hidden password and checks it's never shown or sent back, presses Ctrl+C, checks every way to run and close, and runs the whole `--request` flow, including decline, busy and a 3,000-line output. It also installs into a throwaway home, launches through the installed `.desktop` file, and checks the window's icon, its 1px border and its background from a screenshot.
+- `tests/gui_xvfb.sh` is an end-to-end test on a real X11 display. It starts a private Xvfb server, runs muffin (Cinnamon's window manager) and drives runbox with xdotool: real key presses and real clicks. It answers a `[Y/n]` prompt, types a hidden password and checks it's never shown or sent back, presses Ctrl+C, checks every way to run and close, and runs the whole `--request` flow, including decline, busy and a 3,000-line output. It clicks Exit idle and mid-run, wraps a 300-character command and checks it runs byte for byte, and drags the window by its bar and its status line, comparing the window's position before and after. It also checks that a drag in the command box or the terminal selects text and leaves the window where it was. It also installs into a throwaway home, launches through the installed `.desktop` file, and checks the window's icon, its 1px border and its background from a screenshot.
 - The GUI test needs `xvfb`, `xdotool`, `x11-utils`, `x11-apps`, `wmctrl`, `muffin`, `dbus`, `desktop-file-utils` and `libglib2.0-bin`. If one is missing it exits 77, which means skipped. A skip is not a pass.
 - CI runs formatting, clippy, the unit tests, a release build and the GUI test on every pull request, inside a Debian 13 container.
 
