@@ -11,6 +11,7 @@ keywords = ["terminal", "popup", "gtk4", "vte", "approval"]
 categories = ["command-line-utilities", "gui"]
 
 [dependencies]
+gdk4-x11 = { version = "0.11", features = ["xlib"] }
 gio = { version = "0.22", features = ["v2_80"] }
 gtk4 = { version = "0.11", features = ["v4_18"] }
 nix = { version = "0.31", features = ["signal", "process"] }

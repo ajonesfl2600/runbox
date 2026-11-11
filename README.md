@@ -41,7 +41,7 @@ The command box wraps a long command so you can read all of it before you run it
 
 The window has no title bar. To move it, drag the empty space around the command box and buttons, or the status line at the bottom. Dragging in the command box or the terminal selects text, as usual.
 
-Only one window runs at a time. Pressing Super+R again brings back the open one.
+There's one Super+R popup. Pressing Super+R again brings back the open one. Each `--request` gets its own window, described below.
 
 ## The `--request` contract
 
@@ -49,11 +49,46 @@ Only one window runs at a time. Pressing Super+R again brings back the open one.
 runbox --request "sudo apt update"
 ```
 
-1. If runbox isn't open, this opens it.
-2. The command goes into the popup with a yellow note asking you to check it.
-3. It runs only when you press Enter (or Ctrl+Enter, Alt+R, or click Run). You can edit it first.
-4. The caller blocks until the run ends or you close the window.
-5. On stdout the caller gets the run's text, starting with the `$ command` line. Scrollback is included, up to 10,000 lines. Anything typed at a hidden prompt, like a `sudo` password, never shows up. A short status line (`runbox: exit 0`, `runbox: declined`) goes to stderr.
+1. The command opens in its own window, with a yellow note asking you to check it.
+2. It runs only when you press Enter (or Ctrl+Enter, Alt+R, or click Run) in that window. You can edit it first.
+3. The caller blocks until the run ends or you close the window.
+4. On stdout the caller gets the run's text, starting with the `$ command` line. Scrollback is included, up to 10,000 lines. Anything typed at a hidden prompt, like a `sudo` password, never shows up. A short status line (`runbox: exit 0`, `runbox: declined`) goes to stderr.
+
+### Several requests at once
+
+Each request gets its own window and its own terminal, so a second command can wait for you, or run, while a long one is still going. Every caller gets back only its own command's output and exit code. Declining or closing one window doesn't touch the others.
+
+- Each window has an ID. It shows in the title (`Runbox [upgrade]`) and in yellow at the left of the bar, so you can tell which command is which. Pick one with `--id`, or runbox picks `r1`, `r2` and so on.
+- New windows open a little down and to the right of the last one, so they don't stack. (X11 only. On Wayland the compositor places them.)
+- At most 4 requests can be open at once. Past that, `--request` exits `75` with `runbox: busy: 4 requests already open ...` on stderr. An ID that's still open is refused with `75` too.
+- A finished window stays open so you can read it. The next request takes over the oldest finished window instead of opening a new one, so finished windows never use up the 4. Close a window with Esc when you're done with it.
+
+### Flags
+
+| Flag | What it does |
+|---|---|
+| `--request "CMD"` | Open a window with CMD for review. Required for the flags below |
+| `--id NAME` | Name the request. 1 to 32 characters from `A-Z a-z 0-9 . _ -` |
+| `--json` | Print one JSON object instead of the raw output (see below) |
+| `--output-file PATH` | Also write the full output to PATH. The file is created mode `0600`, because output can hold secrets. A relative path starts in the caller's folder |
+| `--list` | Print the open requests, one per line: ID, state (`waiting`, `running`, `done`), seconds open and the command's first line, tab-separated. Prints `no open requests` when there are none |
+
+`--json` prints one line when the run ends:
+
+```json
+{"id":"upgrade","command":"sudo apt full-upgrade -y","exit_code":0,"status":"ran","started":1762866000,"ended":1762866420,"output":"$ sudo apt full-upgrade -y\n...\n"}
+```
+
+- `status` is `ran` (it finished, with any exit code), `declined` (it never ran) or `killed` (a signal ended it, like Ctrl+C, or the window closed mid-run).
+- `command` is what actually ran. If you edited it before pressing Enter, it's the edited one.
+- `started` and `ended` are Unix seconds. For a declined request, `started` is when the request came in.
+- `output` is the same text the caller would get without `--json`. When the window closes mid-run, it's what the command had printed so far.
+
+```bash
+runbox --request "sudo apt full-upgrade -y" --id upgrade --json --output-file upgrade.log &
+runbox --request "sudo systemctl restart nginx" --id nginx
+runbox --list
+```
 
 Exit codes:
 
@@ -61,7 +96,7 @@ Exit codes:
 |---|---|
 | the command's own code | It ran. A command killed by a signal gives 128 + the signal, so Ctrl+C gives 130, like bash |
 | `125` | Declined with Esc or Exit, or the window closed before the command finished |
-| `75` | Busy: another request is waiting or a command is running. Try again later |
+| `75` | Busy: 4 requests are already open, or the `--id` is already open. Try again later |
 | `2` | Bad arguments |
 
 Here's a script that asks before it does anything as root:
@@ -73,7 +108,7 @@ rc=$?
 case $rc in
   0)   echo "installed" ;;
   125) echo "the user said no" ;;
-  75)  echo "runbox is busy, try again later" ;;
+  75)  echo "runbox has 4 requests open, try again later" ;;
   *)   echo "failed with exit $rc"; printf '%s\n' "$out" ;;
 esac
 ```
@@ -135,7 +170,7 @@ runbox is an approval step. It is not a sandbox.
 ## How it's tested
 
 - `cargo test` runs the unit tests.
-- `tests/gui_xvfb.sh` is an end-to-end test on a real X11 display. It starts a private Xvfb server, runs muffin (Cinnamon's window manager) and drives runbox with xdotool: real key presses and real clicks. It answers a `[Y/n]` prompt, types a hidden password and checks it's never shown or sent back, presses Ctrl+C, checks every way to run and close, and runs the whole `--request` flow, including decline, busy and a 3,000-line output. It clicks Exit idle and mid-run, wraps a 300-character command and checks it runs byte for byte, and drags the window by its bar and its status line, comparing the window's position before and after. It also checks that a drag in the command box or the terminal selects text and leaves the window where it was. It also installs into a throwaway home, launches through the installed `.desktop` file, and checks the window's icon, its 1px border and its background from a screenshot.
+- `tests/gui_xvfb.sh` is an end-to-end test on a real X11 display. It starts a private Xvfb server, runs muffin (Cinnamon's window manager) and drives runbox with xdotool: real key presses and real clicks. It answers a `[Y/n]` prompt, types a hidden password and checks it's never shown or sent back, presses Ctrl+C, checks every way to run and close, and runs the whole `--request` flow, including decline and a 3,000-line output. It opens several requests at once and checks each caller gets its own output and exit code (0 and 3), that both run at the same time, that a fifth request past the cap gets 75, that declining one window leaves the others alone, and that `--list`, `--json` (ran, declined, killed) and `--output-file` give the right fields. It clicks Exit idle and mid-run, wraps a 300-character command and checks it runs byte for byte, and drags the window by its bar and its status line, comparing the window's position before and after. It also checks that a drag in the command box or the terminal selects text and leaves the window where it was. It also installs into a throwaway home, launches through the installed `.desktop` file, and checks the window's icon, its 1px border and its background from a screenshot.
 - The GUI test needs `xvfb`, `xdotool`, `x11-utils`, `x11-apps`, `wmctrl`, `muffin`, `dbus`, `desktop-file-utils` and `libglib2.0-bin`. If one is missing it exits 77, which means skipped. A skip is not a pass.
 - CI runs formatting, clippy, the unit tests, a release build and the GUI test on every pull request, inside a Debian 13 container.
 

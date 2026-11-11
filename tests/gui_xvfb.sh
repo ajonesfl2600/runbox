@@ -145,7 +145,12 @@ launch() {
     sleep 0.3
 }
 
-window_count() { xdotool search --onlyvisible --name '^Runbox$' 2>/dev/null | wc -l; }
+# Every runbox window: the plain popup ("Runbox") and request windows ("Runbox [id]").
+# xdotool matches names without case, and a tooltip is a window called "runbox",
+# so check the exact title again.
+window_count() {
+    xdotool search --onlyvisible --name '^Runbox($| \[)' getwindowname %@ 2>/dev/null | grep -cE '^Runbox($| \[)'
+}
 app_alive() { kill -0 "$APP_PID" 2>/dev/null; }
 
 # Wait for the dump (written when each command ends) to contain a pattern.
@@ -227,8 +232,14 @@ input_val() { sed -n "s/^$1=//p" "$DUMP.input" 2>/dev/null; }
 timeout 5 "$BIN" --help >/dev/null 2>&1; HELP_RC=$?
 timeout 5 "$BIN" --bogus >/dev/null 2>&1; BOGUS_RC=$?
 timeout 5 "$BIN" --request >/dev/null 2>&1; NOARG_RC=$?
+timeout 5 "$BIN" --request ls --id "a b" >/dev/null 2>&1; BADID_RC=$?
+timeout 5 "$BIN" --json >/dev/null 2>&1; JSONONLY_RC=$?
+timeout 5 "$BIN" --list >"$WORK/list0.out" 2>&1; LIST0_RC=$?
 check "--help exits 0 without a window" '[[ "$HELP_RC" == 0 && "$(window_count)" == 0 ]]'
 check "bad arguments exit 2 without a window" '[[ "$BOGUS_RC" == 2 && "$NOARG_RC" == 2 && "$(window_count)" == 0 ]]'
+check "a bad --id, or --json with no --request, exits 2" '[[ "$BADID_RC" == 2 && "$JSONONLY_RC" == 2 && "$(window_count)" == 0 ]]'
+check "--list with nothing running says so (exit 0, no window)" \
+    '[[ "$LIST0_RC" == 0 && "$(cat "$WORK/list0.out")" == "no open requests" && "$(window_count)" == 0 ]]'
 
 # ---------------------------------------------------------------------------
 launch
@@ -484,7 +495,7 @@ request_bg() {
     RUNBOX_DUMP="$DUMP" SHELL=/bin/bash "$BIN" --request "$1" >"$REQ_OUT" 2>"$REQ_ERR" &
     RPID=$!
     for _ in $(seq 300); do
-        [[ -n "$(xdotool search --onlyvisible --name '^Runbox$' 2>/dev/null)" ]] && break
+        [[ -n "$(xdotool search --onlyvisible --name '^Runbox \[' 2>/dev/null)" ]] && break
         sleep 0.01
     done
     sleep 0.4
@@ -513,9 +524,12 @@ check "request: exit code comes back (0)" '[[ "$RC" == 0 ]]'
 check "request: output comes back" 'grep -qx "req-out" "$REQ_OUT" && grep -qx "hi:bob" "$REQ_OUT"'
 check "request: output starts with the command line" 'head -1 "$REQ_OUT" | grep -qF "$ echo req-out"'
 check "request: window stays open afterwards" '[[ "$(window_count)" == 1 ]]'
+check "request: a request with no --id gets a generated one in the title" \
+    '[[ -n "$(xdotool search --onlyvisible --name "^Runbox \[r[0-9]+\]\$" 2>/dev/null)" ]]'
 
 request_bg "exit 4"; xdotool key Return; wait_rc
 check "request: command's own exit code (4)" '[[ "$RC" == 4 ]]'
+check "request: the next request takes over the finished window (still 1)" '[[ "$(window_count)" == 1 ]]'
 
 request_bg "read -s -p 'Password: ' p; echo; echo len:\${#p}"
 xdotool key Return; sleep 0.8
@@ -532,11 +546,6 @@ check "request: Ctrl+C gives 130" '[[ "$RC" == 130 ]]'
 
 # Nothing runs without Enter: decline with Esc.
 request_bg "touch $WORK/must-not-exist"
-FIRST=$RPID
-RUNBOX_DUMP="$DUMP" "$BIN" --request "echo second" >"$WORK/busy.out" 2>"$WORK/busy.err"
-BUSY_RC=$?
-check "request: a second request while one waits is refused (75)" '[[ "$BUSY_RC" == 75 ]] && grep -q busy "$WORK/busy.err"'
-RPID=$FIRST
 xdotool key Escape; wait_rc
 check "request: Esc declines (125)" '[[ "$RC" == 125 ]] && grep -q declined "$REQ_ERR"'
 check "request: declined command did not run" '[[ ! -e "$WORK/must-not-exist" ]]'
@@ -544,7 +553,7 @@ check "request: Esc closed the window" '[[ "$(window_count)" == 0 ]]'
 
 # The Exit button declines a request the same way Esc does.
 request_bg "touch $WORK/exit-must-not-exist"
-WID=$(xdotool search --onlyvisible --name '^Runbox$' 2>/dev/null | head -1)
+WID=$(xdotool search --onlyvisible --name '^Runbox \[' 2>/dev/null | head -1)
 click_exit; wait_rc
 check "request: Exit click declines (125)" '[[ "$RC" == 125 ]] && grep -q declined "$REQ_ERR"'
 check "request: command declined with Exit did not run" '[[ ! -e "$WORK/exit-must-not-exist" ]]'
@@ -561,6 +570,149 @@ request_bg "sleep 31.3"; xdotool key Return; sleep 0.8
 xdotool key ctrl+w; sleep 0.3; xdotool key ctrl+w; wait_rc
 check "request: Ctrl+W twice mid-run answers 125" '[[ "$RC" == 125 ]] && grep -q "closed before" "$REQ_ERR"'
 check "request: and the command was killed" '! pgrep -f "sleep 31.3" >/dev/null'
+
+# ---------------------------------------------------------------------------
+# Several requests at once. Each gets its own window and its own
+# answer. Keys go to one window by name: "Runbox [id]".
+declare -A R_PID R_RC
+# req_start NAME ARGS...: a request in the background. Its stdout and stderr go
+# to $WORK/NAME.out and $WORK/NAME.err.
+req_start() {
+    local name=$1; shift
+    RUNBOX_DUMP="$DUMP" SHELL=/bin/bash "$BIN" "$@" >"$WORK/$name.out" 2>"$WORK/$name.err" &
+    R_PID[$name]=$!
+}
+win_of()    { xdotool search --onlyvisible --name "^Runbox \[$1\]\$" 2>/dev/null | head -1; }
+wait_win()  { for _ in $(seq 250); do [[ -n "$(win_of "$1")" ]] && return 0; sleep 0.02; done; return 1; }
+req_alive() { kill -0 "${R_PID[$1]}" 2>/dev/null; }
+# key_in ID KEY: press KEY in the window for request ID.
+key_in() {
+    local w; w=$(win_of "$1")
+    [[ -n "$w" ]] || return 1
+    xdotool windowactivate --sync "$w" 2>/dev/null; sleep 0.3
+    xdotool key "$2"
+}
+# req_wait NAME [tenths]: wait for a request to exit; R_RC[NAME] is its code (999 = still waiting).
+req_wait() {
+    local name=$1 limit=${2:-80}
+    R_RC[$name]=999
+    for _ in $(seq "$limit"); do
+        if ! req_alive "$name"; then wait "${R_PID[$name]}"; R_RC[$name]=$?; return; fi
+        sleep 0.1
+    done
+}
+all_waiting() {
+    local file=$1 id; shift
+    for id in "$@"; do grep -qP "^$id\twaiting\t" "$file" || return 1; done
+}
+win_pos() { eval "$(xdotool getwindowgeometry --shell "$1")"; echo "$X $Y"; }
+# One field of the one-line JSON a --json caller printed.
+json_has() { grep -qF -- "$2" "$WORK/$1.out"; }
+
+# Park the pointer in a corner so no tooltip pops up over a window.
+xdotool mousemove 0 0
+check "multi: nothing open before the multi-request tests" '[[ "$(window_count)" == 0 ]]'
+# Started together, both from cold: they race to start the window process.
+req_start job-a --id job-a --request "sleep 2.5; echo out-a"
+req_start job-b --id job-b --json --output-file "$WORK/b-full.txt" --request "sleep 2.5; echo out-b; exit 3"
+wait_win job-a; wait_win job-b; sleep 0.4
+check "multi: two requests open two windows" '[[ "$(window_count)" == 2 ]]'
+check "multi: --id shows in each window title" '[[ -n "$(win_of job-a)" && -n "$(win_of job-b)" ]]'
+POS_A=$(win_pos "$(win_of job-a)"); POS_B=$(win_pos "$(win_of job-b)")
+echo "      window positions: job-a=$POS_A job-b=$POS_B"
+check "multi: the second window opens offset from the first" '[[ -n "$POS_A" && "$POS_A" != "$POS_B" ]]'
+"$BIN" --list >"$WORK/list-wait.out" 2>&1
+check "multi: --list shows both, waiting" \
+    'grep -qP "^job-a\twaiting\t\d+s\tsleep 2.5; echo out-a$" "$WORK/list-wait.out" && grep -qP "^job-b\twaiting\t" "$WORK/list-wait.out"'
+check "multi: nothing has run before Enter" 'req_alive job-a && req_alive job-b && ! grep -q out- "$WORK/job-a.out" "$WORK/job-b.out"'
+key_in job-a Return; key_in job-b Return
+sleep 0.6
+"$BIN" --list >"$WORK/list-run.out" 2>&1
+check "multi: both commands run at the same time (--list: both running)" \
+    'grep -qP "^job-a\trunning\t" "$WORK/list-run.out" && grep -qP "^job-b\trunning\t" "$WORK/list-run.out"'
+req_wait job-a; req_wait job-b
+check "multi: each caller gets its own exit code (0 and 3)" '[[ "${R_RC[job-a]}" == 0 && "${R_RC[job-b]}" == 3 ]]'
+check "multi: job-a gets only its own output" 'grep -qx "out-a" "$WORK/job-a.out" && ! grep -q "out-b" "$WORK/job-a.out"'
+check "multi: job-b gets only its own output" 'json_has job-b "out-b" && ! json_has job-b "out-a"'
+check "multi: --json prints one line" '[[ "$(wc -l <"$WORK/job-b.out")" == 1 ]]'
+check "multi: --json has id, command, exit_code and status" \
+    'json_has job-b "{\"id\":\"job-b\",\"command\":\"sleep 2.5; echo out-b; exit 3\",\"exit_code\":3,\"status\":\"ran\",\"started\":"'
+check "multi: --json has started, ended and output" \
+    'grep -qP "\"started\":\d{10},\"ended\":\d{10},\"output\":\"\\\$ sleep 2.5; echo out-b; exit 3\\\\nout-b\\\\n\"}$" "$WORK/job-b.out"'
+check "multi: --output-file holds the output" 'grep -qx "out-b" "$WORK/b-full.txt" && head -1 "$WORK/b-full.txt" | grep -qF "$ sleep 2.5"'
+check "multi: --output-file is mode 600" '[[ "$(stat -c %a "$WORK/b-full.txt")" == 600 ]]'
+"$BIN" --list >"$WORK/list-done.out" 2>&1
+check "multi: finished windows stay open and list as done" \
+    '[[ "$(window_count)" == 2 ]] && grep -qP "^job-a\tdone\t" "$WORK/list-done.out" && grep -qP "^job-b\tdone\t" "$WORK/list-done.out"'
+
+# The cap. Two finished windows get taken over, two more open, then a fifth is refused.
+req_start w1 --id w1 --json --request "sleep 30.7"
+wait_win w1
+req_start w2 --id w2 --json --request "touch $WORK/w2-must-not-exist"
+wait_win w2
+req_start w3 --id w3 --request "sleep 2.5; echo w3-done"
+wait_win w3
+req_start w4 --id w4 --request "touch $WORK/w4-must-not-exist"
+wait_win w4; sleep 0.4
+echo "      open windows: $(xdotool search --onlyvisible --name '^Runbox' getwindowname %@ 2>/dev/null | tr '\n' ' ')"
+check "cap: four open requests, four windows (finished ones were reused)" \
+    '[[ "$(window_count)" == 4 && -z "$(win_of job-a)" && -z "$(win_of job-b)" ]]'
+timeout 10 "$BIN" --request "touch $WORK/over-must-not-exist" --id over >"$WORK/over.out" 2>"$WORK/over.err"
+OVER_RC=$?
+echo "      over the cap: rc=$OVER_RC stderr: $(cat "$WORK/over.err")"
+check "cap: a fifth request exits 75" '[[ "$OVER_RC" == 75 ]]'
+check "cap: with a clear message" 'grep -q "^runbox: busy: 4 requests already open" "$WORK/over.err"'
+check "cap: no fifth window opened" '[[ "$(window_count)" == 4 && -z "$(win_of over)" ]]'
+timeout 10 "$BIN" --request "true" --id w3 >/dev/null 2>"$WORK/dup.err"
+DUP_RC=$?
+check "cap: an id that's still open is refused (75)" '[[ "$DUP_RC" == 75 ]] && grep -q "id in use: w3" "$WORK/dup.err"'
+"$BIN" --list >"$WORK/list-cap.out" 2>&1
+check "--list shows every open request" \
+    '[[ "$(wc -l <"$WORK/list-cap.out")" == 4 ]] && all_waiting "$WORK/list-cap.out" w1 w2 w3 w4'
+
+# Declining one window leaves the others alone, even one that's running.
+key_in w3 Return; sleep 0.6
+key_in w4 Escape
+req_wait w4 30
+check "decline: Esc in w4 answers w4 with 125" '[[ "${R_RC[w4]}" == 125 ]] && grep -q declined "$WORK/w4.err"'
+check "decline: the declined command did not run" '[[ ! -e "$WORK/w4-must-not-exist" ]]'
+check "decline: only that window closed (3 left)" '[[ "$(window_count)" == 3 && -z "$(win_of w4)" ]]'
+check "decline: the running request in w3 keeps running" 'req_alive w3 && pgrep -f "sleep 2.5; echo w3-done" >/dev/null'
+check "decline: the waiting requests are still waiting" 'req_alive w1 && req_alive w2'
+req_wait w3
+check "decline: w3 still finishes with its own code and output" '[[ "${R_RC[w3]}" == 0 ]] && grep -qx "w3-done" "$WORK/w3.out"'
+
+# --json for a declined request and for a killed command.
+key_in w2 Escape; req_wait w2 30
+check "json: a declined request reports status declined (125)" \
+    '[[ "${R_RC[w2]}" == 125 ]] && json_has w2 "\"id\":\"w2\"" && json_has w2 "\"exit_code\":125,\"status\":\"declined\"" && json_has w2 "\"output\":\"\"}"'
+check "json: the declined command did not run" '[[ ! -e "$WORK/w2-must-not-exist" ]]'
+key_in w1 Return; sleep 0.8
+key_in w1 ctrl+c; req_wait w1 30
+check "json: a killed command reports status killed (130)" \
+    '[[ "${R_RC[w1]}" == 130 ]] && json_has w1 "\"exit_code\":130,\"status\":\"killed\"" && json_has w1 "\"output\":\"\$ sleep 30.7"'
+
+# Very long output through --json and --output-file.
+req_start big --id big --json --output-file "$WORK/big.txt" --request "seq 1 3000"
+wait_win big; sleep 0.3
+key_in big Return; req_wait big 100
+check "json: 3000 lines of output arrive whole" \
+    '[[ "${R_RC[big]}" == 0 && "$(grep -cxE "[0-9]+" "$WORK/big.txt")" == 3000 ]] && json_has big "\\n2999\\n3000\\n\"}"'
+
+# Closing mid-run: the caller hears "killed" and gets what ran so far.
+req_start cut --id cut --json --request "echo cut-start; sleep 31.1"
+wait_win cut; sleep 0.3
+key_in cut Return; sleep 0.8
+key_in cut ctrl+w; sleep 0.3; xdotool key ctrl+w; req_wait cut 30
+check "json: closing mid-run reports killed (125) with the output so far" \
+    '[[ "${R_RC[cut]}" == 125 ]] && json_has cut "\"status\":\"killed\"" && json_has cut "cut-start"'
+check "json: and the command was killed" '! pgrep -f "sleep 31.1" >/dev/null'
+
+for id in $(xdotool search --onlyvisible --name '^Runbox \[' getwindowname %@ 2>/dev/null | sed -n 's/^Runbox \[\(.*\)\]$/\1/p'); do
+    key_in "$id" Escape; sleep 0.3
+done
+sleep 0.8
+check "multi: every request window closed" '[[ "$(window_count)" == 0 ]]'
 
 # ---------------------------------------------------------------------------
 # Launch the way the menu does: through the INSTALLED .desktop file, with a PATH
